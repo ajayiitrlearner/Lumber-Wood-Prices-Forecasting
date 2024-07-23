@@ -1,0 +1,814 @@
+---
+title: "Forecasting the prices of Lumber wood"
+author: "Ajay Macharla"
+format:
+  html: 
+    fig-align: center
+    embed-resources: true
+    code-fold: true
+    toc: true
+execute: 
+  warning: false
+  editor: visual
+---
+
+# **Section 1 - Exploratory Data Analysis and Time Series Decomposition**
+
+```{r}
+#| code-fold: true
+#| warning: false
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+library(slider)
+library(dplyr)
+library(forecast)
+library(fable)
+library(tsibble)
+library(tidyverse)
+library(feasts)
+library(DT)
+```
+
+```{r}
+#| code-fold: true
+#| warning: false
+lumber <- read.csv("/Users/ajay/Downloads/lumber_price.csv")
+
+
+lumber_tsibble <- lumber %>% select(date, lumber_price) %>%
+  mutate(value = lumber_price) %>%
+  mutate(date = yearmonth(date)) %>%
+  as_tsibble(index = date)
+```
+
+**Source of the data** : U.S. Bureau of Labor Statistics , The data is collected as part of Producer Price Index (PPI) program which measures the average change over time in the selling prices received by domestic producers for their output. The prices included in the PPI are from the first commercial transaction for many products and some services.
+
+**Description**: Contains price of lumber from January 1947 to Nov 2023 monthly . A total of 923 observations of 2 variables 1. date and 2.lumber_price
+
+**Price** **variations**: Supply and demand greatly effect on the cost of lumber. That's why the current boom in housing across America greatly affects lumber prices. Regardless of whether the supply stays the same or lowers, for whatever reason, demand for any product naturally comes with a price increase. Also the effect on inflation, seasonal trends, pandemic , wildfires, govt tarriffs etc have their effect.
+
+**Preliminary** **examination**: Though from 1947 to 2020, the price increased steadily as inflation, in the last 4 years huge fluctuations in the price is observed. That makes it challenging to forecast upcoming prices.
+
+**Visualization of trend through a line chart:**
+
+```{r}
+#| code-fold: true
+#| warning: false
+library(ggplot2)
+lumber$date <- as.Date(lumber$date)
+
+ggplot(lumber, aes(x = date, y = lumber_price)) +
+  geom_line() +
+  labs(title = "Lumber Prices Over Time",
+       x = "Date",
+       y = "Lumber Price")
+
+```
+
+**Summary of statistics:**
+
+```{r}
+#| code-fold: true
+#| warning: false
+mode_value <- as.numeric(names(sort(table(lumber$lumber_price), decreasing = TRUE)[1]))
+std_dev <- sd(lumber$lumber_price)
+data_range <- range(lumber$lumber_price)
+
+summary_stats_df <- data.frame(
+  Metric = c("Mean", "Median", "Mode", "Standard Deviation", "Range"),
+  Value = c(mean(lumber$lumber_price), median(lumber$lumber_price), mode_value, std_dev, paste(data_range, collapse = " - "))
+)
+summary_stats_df
+```
+
+**Box-plot of the data to assess the data distribution:**
+
+```{r}
+#| code-fold: true
+#| warning: false
+ggplot(lumber, aes(y = lumber_price)) +
+  geom_boxplot(fill = "lightblue", color = "black") +
+  labs(title = "Boxplot of Lumber Prices",
+       y = "Lumber Price")
+
+```
+
+From the box-plot we can observe that there are few outliers and the data is skewed right.
+
+#### **Time series decompostion:**
+
+```{r}
+#| code-fold: true
+#| warning: false
+library(forecast)
+
+lumber$date <- as.Date(lumber$date)
+lumber_ts <- ts(lumber$lumber_price, frequency = 12)  # Assuming monthly data
+lumber_decomp <- decompose(lumber_ts)
+
+# Visualize the decomposed time series
+autoplot(lumber_decomp) +
+  labs(title = "Time Series Decomposition - Trend, Seasonal, and Remainder")
+```
+
+Checking seasonality with lag plot and box plot:
+
+**Lag plot :**
+
+```{r}
+#| code-fold: true
+#| warning: false
+lumber_tsibble %>%
+ gg_lag(lumber_price, geom = "point", lags = 1:30) +
+ geom_smooth(aes(color=NULL), method='lm', color='red', se=F)
+```
+
+A lag plot compares a time series against a lagged version of itself. If there's seasonality in the data, you would expect to see a clear pattern or correlation between the time series and its lagged version, with periodic spikes or clusters. As the lagged lumber price is steadily increasing with the current lumber price without any discernible seasonal pattern, it suggests a trend rather than seasonality.
+
+**Box plot:**
+
+```{r}
+#| code-fold: true
+#| warning: false
+lumber_tsibble %>%
+  mutate(ma = slider::slide_dbl(lumber_price, mean, .before = 6, .after = 6, .complete = TRUE)) %>%
+  mutate(detrend = lumber_price - ma) %>%
+  mutate(month = lubridate::month(date, label = TRUE, abbr = TRUE)) %>%
+  ggplot(aes(x = month, y = detrend)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 0, color = 'red')
+```
+
+A box plot can help you visualize the distribution of your data over different time periods within a year. You can create a box plot for each month and consistent patterns or variations across different time intervals.
+
+There is no seasonality. As lumber prices data is not seasonal, seasonal differencing is not needed.\
+
+**Test-train split:**
+
+Splitting the data into training set and testing set.
+
+```{r}
+#| code-fold: true
+#| warning: false
+
+total_rows <- nrow(lumber_tsibble)
+split_index <- floor(0.8 * total_rows)
+training_set <- lumber_tsibble[1:split_index, ]
+testing_set <- lumber_tsibble[(split_index + 1):total_rows, ]
+
+
+ggplot(training_set, aes(x = date, y = lumber_price)) +
+  geom_line() +
+  geom_line(data = testing_set, color = 'red') +
+  theme_bw() +
+  ylab('Lumber Price') +
+  ggtitle('Training (black) and Test (red) Sets')
+
+```
+
+We begin the forecasting with Naive model.
+
+**Naive forecast without drift:**
+
+We are not considering seasonality as we will establish that there is no seasonality in Section-2.
+
+```{r}
+#| code-fold: true
+#| warning: false
+library(ggplot2)
+#lumber$date <- as.Date(lumber$date)
+
+# Time series decomposition
+training_set_tsibble <- ts(training_set$lumber_price, frequency = 12)  # Assuming monthly data
+lumber_decomp <- decompose(lumber_ts)
+
+# Extract trend and seasonal components
+trend_component <- lumber_decomp$trend
+#seasonal_component <- lumber_decomp$seasonal
+
+# Define the length of the forecast
+forecast_length <- 6
+
+# Naive forecast with seasonality
+naive_forecast <- rep(tail(lumber$lumber_price, 1) + trend_component, forecast_length)
+
+# Create a data frame for plotting
+forecast_data <- data.frame(date = seq(max(lumber$date), by = "months", length.out = forecast_length + 1)[-1],
+                            lumber_price = naive_forecast,
+                            type = rep("Naive Forecast", forecast_length))
+
+# Plot the original time series and the naive forecast
+ggplot() +
+  geom_line(data = lumber, aes(x = date, y = lumber_price, color = "Original Time Series"), size = 1) +
+  geom_line(data = forecast_data, aes(x = date, y = lumber_price, color = type, linetype = type), size = 1) +
+  labs(title = "Original Time Series and Naive Forecast",
+       x = "Date",
+       y = "Lumber Price") +
+  scale_color_manual(values = c("blue", "red")) +
+  scale_linetype_manual(values = c("solid", "dashed"))
+```
+
+The historical data exhibits a clear linear trend (i.e., the data is increasing or decreasing steadily over time), a naive drift forecast might provide better predictions. The drift parameter in the naive drift forecast allows the forecast to adjust for this linear trend, resulting in more accurate predictions.
+
+**Naive with drift :**
+
+Fitting the naive drift model without seasonality on the training set.
+
+```{r}
+#| code-fold: true
+#| warning: false
+drift_lm_data = training_set %>% 
+  filter(date == ymd(c('1947-01-01','2023-11-01')))
+
+drift_lm = lm(data = drift_lm_data,value~date)
+
+drift_lm_pred = training_set %>%
+  mutate(pred = predict(drift_lm,newdata=training_set))
+
+
+training_set %>%
+  model(
+    Naive = NAIVE(lumber_price~drift())
+  ) %>%
+  forecast(h = 12) %>%
+  autoplot(training_set, level = NULL,size=1) +
+  geom_vline(aes(xintercept = ymd("2023-11-01")), color = "red", linetype = "dashed") +
+  geom_line(data=drift_lm_pred,aes(date,pred),color='blue',linetype='dashed')+
+  theme_bw()+
+  ylab('Consumer Sentiment')
+
+```
+
+# **Section 2 - ARIMA Modeling**
+
+**Rolling Moving Average plot :**
+
+```{r}
+#| code-fold: true
+#| warning: false
+lumber_rollma <- lumber_tsibble %>%
+  mutate(rolling_ma = slide_dbl(lumber_price, mean, .before = 35, .after = 0)) %>%
+  
+  ggplot() +
+  geom_line(aes(date, rolling_ma)) +
+  geom_smooth(aes(date, rolling_ma), method = 'lm', se = FALSE) +
+  theme_bw() +
+  ggtitle("Lumber Prices 36-Month Rolling Moving Average") +
+  ylab("Rolling Moving Average of Lumber Prices") +
+  xlab("Date")
+
+# Display the plot
+lumber_rollma
+```
+
+kpss test:
+
+```{r}
+#| code-fold: true
+#| warning: false
+unitroot_kpss(lumber$lumber_price) 
+
+```
+
+kpss for differenced data:
+
+```{r}
+#| code-fold: true
+#| warning: false
+unitroot_kpss(difference(lumber$lumber_price)) 
+
+```
+
+From the above plots, Lumber prices are not mean stationary. Since p\<0.01, it indicates mean non-stationary. And since data is non-stationary, calculated difference which is mean stationary.
+
+**Rolling Standard Deviation plot:**
+
+```{r}
+#| code-fold: true
+#| warning: false
+
+library(slider)
+lumber_rollsd <- lumber_tsibble %>%
+  mutate(rolling_sd = slide_dbl(lumber_price, sd, .before = 35, .after = 0)) %>%
+  ggplot() +
+  geom_line(aes(date, rolling_sd)) +
+  geom_smooth(aes(date, rolling_sd), method = 'lm', se = FALSE) +
+  theme_bw() +
+  ggtitle("Lumber Prices Standard Deviation over Time (36-month rolling window)") +
+  ylab("Rolling SD of Lumber Prices") +
+  xlab("Date")
+
+lumber_rollsd
+```
+
+The plots above clearly reveal that the mean of Lumber Prices does not exhibit a consistent trend over the years spanning from 1970 to 2020. Further, the observed price fluctuations follow a pattern that lacks uniformity, suggesting that the variance is not constant throughout the entire time period. Hence the data is not variance stationary.
+
+**Log tranformation :**
+
+```{r}
+#| code-fold: true
+#| warning: false
+data_month = lumber %>%
+  mutate(month = yearmonth(floor_date(date,'month'))) %>%
+  group_by(month) %>%
+  summarize(lumber_price = mean(lumber_price,na.rm=T)) %>%
+  ungroup()
+lumber_log <- data_month %>%
+  mutate(
+    close_log = log1p(lumber_price),
+    close_diff = lumber_price - lag(lumber_price),
+    close_log_diff = close_log - lag(close_log)) %>%
+  drop_na() %>%
+  as_tsibble(index=month)
+```
+
+**Mean and variance stationary after log tranfromation:** When kpss test is done after log transformation as below,
+
+```{r}
+#| code-fold: true
+#| warning: false
+unitroot_kpss(lumber_log$lumber_price) 
+
+unitroot_kpss(difference(lumber_log$lumber_price)) # Difference is stationary
+
+```
+
+Since kpss\>0.05, we have ensured that the log transformed data is variance stationary and mean stationary before further analysis.
+
+\
+**Preliminary guess of whether the time-series appear to be an autoregressive process, moving average process, combined, or neither:**
+
+As we have established that the time-series data are variance non-stationary, we plot the ACF and PCF plots for log transformed data.
+
+**ACF and PACF plots:**
+
+```{r}
+#| code-fold: true
+#| warning: false
+acf = lumber_log %>%
+  ACF(close_log_diff,lag_max=10) %>%
+  autoplot()
+
+pacf =  lumber_log %>%
+  fill_gaps() %>%
+  PACF(close_log_diff,lag_max=10) %>%
+  autoplot()
+
+acf
+pacf
+```
+
+Since there is some dampening in ACF and PACF with 2nd order lag significant, we can guess it as AR(2) process. Also, as the lag values drops in ACF, it can be MA(1) process. Also there are no seasonality spike in ACF and PACF.
+
+Figuring out best arima from ACF/PACF deduction:
+
+```{r}
+#| code-fold: true
+#| warning: false
+library(fable)
+library(fabletools)
+library(dplyr)
+library(tsibble)
+
+
+models <- training_set %>%
+  model(
+    mod1 = ARIMA(lumber_price ~ pdq(0,1,2) + PDQ(0,0,0)),
+    mod2 = ARIMA(lumber_price ~ pdq(3,1,1) + PDQ(0,0,0)),
+    mod3 = ARIMA(lumber_price ~ pdq(5,1,1) + PDQ(0,0,0)),
+    mod4 = ARIMA(lumber_price ~ pdq(2,1,4) + PDQ(0,0,0)),
+
+  ) 
+
+# Get a summary of the model fits
+models_summary <- models %>% glance()
+
+# To view the summary
+models_summary
+```
+
+In the analysis of the time series data, several ARIMA models were fitted based on initial assessments and intuition. After comparing the AIC and BIC values of these models, it was found that Model 4, specifically ARIMA(2,1,4), emerged as the best model with the lowest AIC and BIC values. This indicates that Model 4 provides a better balance between goodness of fit and model complexity, making it a preferred choice.
+
+Using ARIMA:
+
+```{r}
+#| code-fold: true
+#| warning: false
+best_mod <- training_set %>%
+  model(
+    mod1 = ARIMA(lumber_price, approximation=FALSE, stepwise=FALSE)
+  )
+
+best_mod %>%
+  report()
+```
+
+To validate and complement the manual model selection process, the automated ARIMA function from the fable package was employed. The automated ARIMA function also identified ARIMA(2,1,4) as the best model, aligning with the manual selection. This agreement between manual and automated model selection instills confidence in the chosen ARIMA(2,1,4) as a robust representation of the underlying patterns in the time series.
+
+```{r}
+models %>%
+select(mod4) %>%
+gg_tsresiduals()
+```
+
+```{r}
+models %>%
+select(mod3) %>%
+augment() %>%
+features(.innov, ljung_box, lag = 10, dof = 1) # number of AR/MA terms
+```
+
+Upon computing the residuals from the selected model, a Box-Ljung test was conducted to assess the presence of residual autocorrelation. The results of the Box-Ljung test for Model 4 yielded a p-value (0.1403842) is greater than the typical significance level of 0.05, we fail to reject the null hypothesis. This suggests that there is no significant evidence of autocorrelation in the data at the specified lag value. The test statistic (Q = 13.52) alone may seem relatively high, but without statistical significance (i.e., a p-value less than 0.05), it does not provide sufficient evidence to reject the null hypothesis. Therefore, based on these results, we cannot conclude that there is autocorrelation in the data at the specified lag.
+
+We move on to the Meta's prophet model now.
+
+# **Section 3 - Meta Prophet Model**
+
+The basic prophet model is fit as: yt=gt+st+ht+ϵt
+
+where gt is the trend, st is seasonality, and ht are holidays.\
+\
+Seasonal components: Daily, weekly, monthly, yearly, etc.\
+Holidays: For daily data\
+Trend: Estimated along the data with unique slopes identified using changepoint detection
+
+-   **Prophet decomposition:**
+
+    ```{r}
+    #| code-fold: true
+    #| warning: false
+    model = training_set %>%
+        model(prophet = fable.prophet::prophet(lumber_price))
+
+    model %>%
+    components() %>%
+    autoplot()
+    ```
+
+**Change point detection:**
+
+Plotting the considered change points:
+
+```{r}
+#| code-fold: true
+#| warning: false
+changepoints = model %>%
+glance() %>%
+pull(changepoints) %>%
+bind_rows() %>%
+.$changepoints
+
+training_set %>%
+ggplot()+
+geom_line(aes(date,lumber_price))+
+#geom_vline(aes(xintercept=ymd('2000-01-01')))
+geom_vline(xintercept=as.Date(changepoints),color='red',linetype='dashed')
+```
+
+Plotting the selected, fewer change points:
+
+```{r}
+#| code-fold: true
+#| warning: false
+changepoints_orig = model %>%
+glance() %>%
+pull(changepoints) %>%
+bind_rows() %>%
+filter(abs(adjustment)>0.01) %>%
+.$changepoints
+
+training_set %>%
+ggplot()+
+geom_line(aes(date,lumber_price))+
+# geom_vline(aes(xintercept=ymd('2000-01-01')))
+geom_vline(xintercept=as.Date(changepoints_orig),color='red',linetype='dashed')
+```
+
+```{r}
+#| code-fold: true
+#| warning: false
+# Number of Changepoints
+
+model = training_set %>%
+    model(
+        prophet_orig = fable.prophet::prophet(lumber_price~growth(n_changepoints=25)+season(period='year')+season(period='week')),
+        prophet_50 = fable.prophet::prophet(lumber_price~growth(n_changepoints=50)+season(period='year')+season(period='week'))
+        )
+
+changepoints_orig = model %>%
+glance() %>%
+filter(.model == 'prophet_orig') %>%
+pull(changepoints) %>%
+bind_rows() %>%
+filter(abs(adjustment)>0.01) %>%
+.$changepoints
+
+changepoints_50 = model %>%
+glance() %>%
+filter(.model == 'prophet_50') %>%
+pull(changepoints) %>%
+bind_rows() %>%
+filter(abs(adjustment)>0.01) %>%
+.$changepoints
+
+training_set %>%
+ggplot()+
+geom_line(aes(date,lumber_price))+
+# geom_vline(aes(xintercept=ymd('2000-01-01')))
+geom_vline(xintercept=as.Date(changepoints_orig),color='red')+
+geom_vline(xintercept=as.Date(changepoints_50),color='blue',linetype='dashed')
+```
+
+We can allow change points to be identified for a greater range
+
+```{r}
+#| code-fold: true
+#| warning: false
+model = training_set %>%
+    model(
+        prophet_orig = fable.prophet::prophet(lumber_price),
+        prophet_90_range = fable.prophet::prophet(lumber_price~growth(changepoint_range=0.9)+season(period='year')+season(period='week')),
+        )
+
+changepoints_orig = model %>%
+glance() %>%
+filter(.model == 'prophet_orig') %>%
+pull(changepoints) %>%
+bind_rows() %>%
+filter(abs(adjustment)>0.01) %>%
+.$changepoints
+
+changepoints_90_range = model %>%
+glance() %>%
+filter(.model == 'prophet_90_range') %>%
+unnest(changepoints) %>%
+bind_rows() %>%
+filter(abs(adjustment)>0.01) %>%
+.$changepoints
+
+model %>%
+forecast(h=36) %>%
+autoplot(training_set,level=NULL)+
+geom_vline(xintercept=as.Date(changepoints_orig),color='blue',linetype='dashed')+
+geom_vline(xintercept=as.Date(changepoints_90_range),color='red',linetype='dashed')
+```
+
+We can allow more or fewer changepoints by specifying "changepoint prior scale." This adjusts the Bayesian methodology for selecting the changepoints.
+
+```{r}
+#| code-fold: true
+#| warning: false
+model = training_set %>%
+    model(
+        prophet_orig = fable.prophet::prophet(lumber_price),
+        prophet_less_flexible = fable.prophet::prophet(lumber_price~growth(changepoint_prior_scale=0.01)+season(period='year')+season(period='week')),
+        prophet_more_flexible = fable.prophet::prophet(lumber_price~growth(changepoint_prior_scale=0.10)+season(period='year')+season(period='week'))
+        )
+
+changepoints_orig = model %>%
+glance() %>%
+unnest(changepoints) %>%
+bind_rows() %>% 
+filter(.model == 'prophet_orig') %>%
+filter(abs(adjustment)>=0.01) %>%
+.$changepoints
+
+changepoints_more_flexible = model %>%
+glance() %>%
+unnest(changepoints) %>%
+bind_rows() %>%
+filter(.model == 'prophet_more_flexible') %>%
+filter(abs(adjustment)>=0.01) %>%
+.$changepoints
+
+changepoints_less_flexible = model %>%
+glance() %>%
+unnest(changepoints) %>%
+bind_rows() %>%
+filter(.model == 'prophet_less_flexible') %>%
+filter(abs(adjustment)>=0.01) %>%
+.$changepoints
+
+model %>%
+forecast(h=36) %>%
+autoplot(training_set,level=NULL)+
+geom_vline(xintercept=as.Date(changepoints_orig),color='blue',linetype='dashed')+
+geom_vline(xintercept=as.Date(changepoints_more_flexible),color='green',linetype='dashed')+
+geom_vline(xintercept=as.Date(changepoints_less_flexible),color='red',linetype='dashed')
+```
+
+More flexible with alter trend:
+
+```{r}
+#| code-fold: true
+#| warning: false
+model %>%
+components() %>%
+autoplot(trend)+
+geom_vline(xintercept=as.Date(changepoints_orig),color='blue',linetype='dashed')+
+geom_vline(xintercept=as.Date(changepoints_more_flexible),color='green',linetype='dashed')+
+geom_vline(xintercept=as.Date(changepoints_less_flexible),color='red',linetype='dashed')
+```
+
+```{r}
+#| code-fold: true
+#| warning: false
+training_set %>%
+    model(
+        prophet_orig = fable.prophet::prophet(lumber_price)
+        ) %>%
+    forecast(h=36) %>%
+    autoplot(training_set)
+```
+
+As seen from the above graphs, more flexible prophet (changepoint_prior_scale =10) and increasing the number of change points to 50 have successfully captured changepoints better compared to the previous versions .
+
+```{r}
+#| code-fold: true
+#| warning: false
+model = training_set %>%
+    model(
+        prophet_orig = fable.prophet::prophet(lumber_price),
+        prophet_less_flexible = fable.prophet::prophet(lumber_price~growth(changepoint_prior_scale=0.01)+season(period='year')+season(period='week')),
+        prophet_more_flexible = fable.prophet::prophet(lumber_price~growth(changepoint_prior_scale=0.10)+season(period='year')+season(period='week'))
+        )
+
+changepoints_orig = model %>%
+glance() %>%
+unnest(changepoints) %>%
+bind_rows() %>% 
+filter(.model == 'prophet_orig') %>%
+filter(abs(adjustment)>=0.01) %>%
+.$changepoints
+
+changepoints_more_flexible = model %>%
+glance() %>%
+unnest(changepoints) %>%
+bind_rows() %>%
+filter(.model == 'prophet_more_flexible') %>%
+filter(abs(adjustment)>=0.01) %>%
+.$changepoints
+
+changepoints_less_flexible = model %>%
+glance() %>%
+unnest(changepoints) %>%
+bind_rows() %>%
+filter(.model == 'prophet_less_flexible') %>%
+filter(abs(adjustment)>=0.01) %>%
+.$changepoints
+
+model %>%
+forecast(h=36) %>%
+autoplot(training_set,level=NULL)+
+geom_vline(xintercept=as.Date(changepoints_orig),color='blue',linetype='dashed')+
+geom_vline(xintercept=as.Date(changepoints_more_flexible),color='green',linetype='dashed')+
+geom_vline(xintercept=as.Date(changepoints_less_flexible),color='red',linetype='dashed')
+```
+
+Seasonality with prophet :
+
+Additive vs multiplicative:
+
+```{r}
+#| code-fold: true
+#| warning: false
+model = training_set %>%
+    model(
+      additive = fable.prophet::prophet(lumber_price~growth()+season(period='year',type='additive')+season(period='week')),
+      multiplicative = fable.prophet::prophet(lumber_price~growth()+season(period='year',type='multiplicative')+season(period='week')))
+
+model %>%
+components() %>%
+autoplot()
+```
+
+There is additive seasonality with a small magnitude through out the time series range. And there is no multiplicative seasonality as per the Prophet decomposition.
+
+# **Section 4 - Model Comparison and Validation**
+
+**Cross-validation scheme:**
+
+```{r}
+#| code-fold: true
+#| warning: false
+cv_data <- training_set %>%
+  stretch_tsibble(.init = 120, .step = 36)
+# initiated from 10 years with a jump of 3 years
+ggplot(cv_data, aes(x = date, y = factor(.id), color = factor(.id))) +
+  geom_point() +
+  theme_bw() +
+  ylab('Iteration') +
+  ggtitle('Samples included in each CV Iteration')
+```
+
+Comparing models. with cross-validation: rolling window cross-validation to assess performance of the model at meaningful thresholds.\
+\
+We are considering basic prophet model as the lumber price data contains only price on 1st of every month, so it would be deviating to consider weekly seasonality factor and holiday factors. Also there is no general seasonality in lumber prices data, so considered basic model.
+
+```{r}
+#| code-fold: true
+#| warning: false
+model = cv_data %>%
+  model(
+    best_arima = ARIMA(lumber_price ~ pdq(2, 1, 4) + PDQ(0, 0, 0)),
+    prophet_model = fable.prophet::prophet(lumber_price),
+    naive_w_drift = NAIVE(lumber_price ~ drift())
+  )
+
+cv_forecast = model %>%
+forecast(h=36)
+
+cv_forecast %>%
+  as_tibble() %>%
+  select(-lumber_price) %>%
+  left_join(
+      training_set
+  ) %>%
+    ggplot()+
+    geom_line(aes(date,lumber_price))+
+    geom_line(aes(date,.mean,color=factor(.id),linetype=.model))+
+    scale_color_discrete(name='Iteration')+
+    ylab('Lumber Price')+
+    xlab('Date')
+   # ylim(0,1000)+
+   # xlim(ymd('1947-01-01'),ymd('2022-12-01'))
+```
+
+RSME at each horizon:
+
+```{r}
+#| code-fold: true
+#| warning: false
+cv_forecast %>%
+  as_tibble() %>%
+  select(-lumber_price) %>%
+  left_join(lumber_tsibble) %>% 
+  group_by(.id, .model) %>%
+  mutate(
+    days_ahead = row_number()  
+  ) %>%
+  ungroup() %>% 
+  filter(!is.na(lumber_price)) %>%
+  group_by(days_ahead, .model) %>%
+  summarize(
+    rmse = sqrt(mean((lumber_price - .mean)^2, na.rm = TRUE)),
+  ) %>%
+  ungroup() %>%
+  ggplot() +
+  geom_point(aes(days_ahead, rmse, color = .model), alpha = 0.4) + 
+  geom_smooth(aes(days_ahead, rmse, color = .model), se = FALSE) +
+  xlab("Days Ahead") +
+  ylab("Smoothed RMSE") +
+  ylim(0, 500)
+```
+
+**Full error metrics on :**
+
+```{r}
+#| code-fold: true
+#| warning: false
+cv_forecast %>%
+  accuracy(training_set)
+```
+
+On observing the above error metrics data ( RMSE,MAE,MAPE), Naive drift and ARIMA are performing best and prophet is performing bad compared to ARIMA and naive drift.
+
+The reason might be because of the basic prophet model we choose without considering different seasonalities we get from prophet. Without continous daily data, prophet seasonality features cant be put to greater use.\
+\
+As the Prophet model is underfitting the training data, adjustments like fine-tuning seasonality parameters, incorporating additional features, tuning hyperparameters, increasing training data, or employing ensemble methods could enhance its performance. By iteratively refining these aspects, the Prophet model's predictive capability can be improved, potentially yielding more accurate forecasts while mitigating underfitting concerns.
+
+**Testing the models on test set:**
+
+```{r}
+#| code-fold: true
+#| warning: false
+cv_forecast %>%
+  accuracy(testing_set)
+```
+
+On verifying the error metrics on testing set, it is in line with training set error metrics where Naive drift followed by ARIMA is performing better.
+
+**'Final forecast:**
+
+As decided from above analysis, Naive drift is the best model for lumber prices data followed closely by ARIMA. The forecast for the next 6 months of lumber_price with Naive drift model on entire dataset is as follows:
+
+```{r}
+#| code-fold: true
+#| warning: false
+library(forecast)
+
+lumber$date <- as.Date(lumber$date)
+ts_lumber <- ts(lumber$lumber_price, frequency = 12, start = c(1947, 1), end = c(2023, 11))
+
+forecast_result <- snaive(ts_lumber, h = 6,drift = TRUE)
+print(forecast_result)
+plot(forecast_result, main = "6 Time Period Naive Forecast with Drift", xlab = "Time", ylab = "Lumber Price")
+
+
+
+training_set_tsibble <- training_set %>% select(date, lumber_price) %>%
+  mutate(value = lumber_price) %>%
+  mutate(date = yearmonth(date)) %>%
+  as_tsibble(index = date)
+```
